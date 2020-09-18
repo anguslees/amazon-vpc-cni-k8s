@@ -5,4 +5,7 @@ grpc-health-probe
 portmap
 loopback
 bandwidth
+host-local
+ptp
 routed-eni-cni-plugin
+testdata/cloudformation

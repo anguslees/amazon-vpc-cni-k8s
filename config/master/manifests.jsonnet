@@ -384,6 +384,262 @@ local metricsHelper = {
   },
 };
 
+local v6pd = {
+  daemonset: {
+    kind: "DaemonSet",
+    apiVersion: "apps/v1",
+    metadata: {
+      // NB: intentionally conflicts with awsnode.daemonset above.
+      // Can only have one installed, and this allows in-place switching.
+      name: "aws-node",
+      namespace: "kube-system",
+      labels: {
+        "k8s-app": "aws-v6pd",
+      },
+    },
+    spec: {
+      local spec = self,
+      updateStrategy: {
+        type: "RollingUpdate",
+        rollingUpdate: {maxUnavailable: "10%"},
+      },
+      selector: {
+        matchLabels: spec.template.metadata.labels,
+      },
+      template: {
+        metadata: {
+          labels: {
+            "k8s-app": "aws-v6pd",
+          },
+        },
+        spec: {
+          priorityClassName: "system-node-critical",
+          terminationGracePeriodSeconds: 10,
+          affinity: {
+            nodeAffinity: {
+              requiredDuringSchedulingIgnoredDuringExecution: {
+                nodeSelectorTerms: [
+                  {
+                    matchExpressions: [
+                      {
+                        key: prefix + "kubernetes.io/os",
+                        operator: "In",
+                        values: ["linux"],
+                      },
+                      {
+                        key: prefix + "kubernetes.io/arch",
+                        operator: "In",
+                        values: ["amd64"],
+                      },
+                      {
+                        key: "eks.amazonaws.com/compute-type",
+                        operator: "NotIn",
+                        values: ["fargate"],
+                      },
+                    ],
+                  } for prefix in ["beta.", ""]
+                ],
+              },
+            },
+          },
+
+          hostNetwork: true,
+          automountServiceAccountToken: false,
+
+          volumes: [
+            {
+              name: "cni-bin-dir",
+              hostPath: {path: "/opt/cni/bin", type: "DirectoryOrCreate"},
+            },
+            {
+              name: "cni-net-dir",
+              hostPath: {path: "/etc/cni/net.d", type: "DirectoryOrCreate"},
+            },
+            {
+              name: "my-prefix",
+              hostPath: {path: "/run/fake-pd/my-prefix", type: "File"},
+            },
+          ],
+
+          initContainers: [{
+            name: "conf",
+            image: "%s/amazon-v6pd-cni-init:%s" % [$.ecrRepo, $.version],
+            local v6pd_template = importstr "v6pd.jsonnet",
+            command: ["/bin/sh", "-x", "-e", "-c", self.shcmd],
+            shcmd:: |||
+              install -m755 host-local bandwidth portmap ptp egress-v4 /opt/cni/bin
+              ./json-tmpl --file=- -v=4 --logtostderr >/etc/cni/net.d/10-aws.conflist <<'EOF'
+              %sEOF
+            ||| % v6pd_template,
+            volumeMounts: [
+              {mountPath: "/opt/cni/bin", name: "cni-bin-dir"},
+              {mountPath: "/etc/cni/net.d", name: "cni-net-dir"},
+              {mountPath: "/my-prefix", name: "my-prefix", readOnly: true},
+            ],
+          }],
+
+          containers_:: {
+            pause: {
+              name: "pause",
+              image: "%s/eks/pause-amd64:3.1" % $.ecrRepo,
+            }
+          },
+          containers: objectValues(self.containers_),
+        },
+      },
+    },
+  },
+
+  // This just "fakes" what Prefix Delegation would do, for testing.
+  // It is not necessary once Prefix Delegation launches.
+  fakepd: {
+    kind: "DaemonSet",
+    apiVersion: "apps/v1",
+    metadata: {
+      name: "fake-pd",
+      namespace: "kube-system",
+      labels: {
+        "k8s-app": "fake-pd",
+      },
+    },
+    spec: {
+      local spec = self,
+      updateStrategy: {
+        type: "RollingUpdate",
+        rollingUpdate: {maxUnavailable: "10%"},
+      },
+      selector: {
+        matchLabels: spec.template.metadata.labels,
+      },
+      template: {
+        metadata: {
+          labels: {
+            "k8s-app": "fake-pd",
+          },
+        },
+        spec: {
+          priorityClassName: "system-node-critical",
+          terminationGracePeriodSeconds: 1,
+          hostNetwork: true,
+          tolerations: [
+            {effect: "NoSchedule", operator: "Exists", key: "node.kubernetes.io/not-ready"},
+          ],
+          serviceAccountName: $.fakepdAccount.metadata.name,
+
+          volumes: [
+            {
+              name: "confdir",
+              hostPath: {path: "/run/fake-pd", type: "DirectoryOrCreate"},
+            },
+          ],
+
+          containers_:: {
+            pd: {
+              // Poor-man's route broadcast (this is basically flannel host-gw)
+              name: "pd",
+              image: "bitnami/kubectl:1.18.8",
+              command: ["/bin/sh", "-x", "-e", "-c", self.shcmd],
+              shcmd:: |||
+                metadata() {
+                  curl -q http://169.254.169.254/2019-10-01/meta-data/$1
+                }
+                ip6cidr() {
+                  # This is a randomly chosen ULA (/48), subnet 0 (/64), with embedded v4 address (/104).  Note bits 64-71 must be zero because RFC4291.
+                  IFS=.; printf "fd47:6d80:fb79:0:%02x:%02x%02x:%02x00::/104" $1; IFS=
+                }
+
+                install_packages iproute2
+
+                while :; do
+                  myip=$(metadata network/interfaces/macs/$(metadata mac)/ipv6s)
+                  mypfx=$(ip6cidr $(metadata local-ipv4))
+                  kubectl patch node $MYNODE -p "{\"metadata\":{\"annotations\":{\"eks.amazon.com/v6ip\":\"$myip\",\"eks.amazon.com/v6prefix\":\"$mypfx\"}}}"
+                  echo -n $mypfx > /conf/my-prefix
+
+                  for node in $(kubectl get nodes -o name); do
+                    pfx=$(kubectl get $node -o jsonpath="{.metadata.annotations['eks\.amazon\.com/v6prefix']}")
+                    ip=$(kubectl get $node -o jsonpath="{.metadata.annotations['eks\.amazon\.com/v6ip']}")
+                    if [ -z "$pfx" -o -z "$ip" ]; then
+                      continue
+                    fi
+                    if [ $node = node/$MYNODE ]; then
+                      ip route replace to $pfx dev eth0 expires 600
+                    else
+                      ip route replace to $pfx via $ip expires 600
+                    fi
+                  done
+
+                  sleep 300
+                done
+              |||,
+              env_:: {
+                MYNODE: {
+                  valueFrom: {
+                    fieldRef: {fieldPath: "spec.nodeName"},
+                  },
+                },
+              },
+              env: [
+                {name: kv[0]} + if std.isObject(kv[1]) then kv[1] else {value: kv[1]}
+                for kv in objectItems(self.env_)
+              ],
+              securityContext: {
+                capabilities: {add: ["NET_ADMIN"]},
+                // Ensure we can write to /run/fake-pd
+                runAsUser: 0,
+              },
+              volumeMounts: [
+                {name: "confdir", mountPath: "/conf", readOnly: false},
+              ],
+            },
+          },
+          containers: objectValues(self.containers_),
+        },
+      },
+    },
+  },
+
+  fakepdAccount: {
+    apiVersion: "v1",
+    kind: "ServiceAccount",
+    metadata: {
+      name: "fake-pd",
+      namespace: "kube-system",
+    },
+  },
+
+  fakepdRole: {
+    apiVersion: "rbac.authorization.k8s.io/v1",
+    kind: "ClusterRole",
+    metadata: {name: "fake-pd"},
+    rules: [
+      {
+        apiGroups: [""],
+        resources: ["nodes"],
+        verbs: ["list", "get", "update", "patch"],
+      },
+    ],
+  },
+
+  fakepdBinding: {
+    apiVersion: "rbac.authorization.k8s.io/v1",
+    kind: "ClusterRoleBinding",
+    metadata: {
+      name: "fake-pd",
+    },
+    roleRef: {
+      apiGroup: "rbac.authorization.k8s.io",
+      kind: $.fakepdRole.kind,
+      name: $.fakepdRole.metadata.name,
+    },
+    subjects: [{
+      kind: $.fakepdAccount.kind,
+      name: $.fakepdAccount.metadata.name,
+      namespace: $.fakepdAccount.metadata.namespace,
+    }],
+  },
+};
+
 local byRegion(basename, template) = {
   [
     basename + (if kv[0] == "default" then "" else "-" + kv[0])
@@ -394,7 +650,8 @@ local byRegion(basename, template) = {
 // Output values, as jsonnet objects
 local output =
 byRegion("aws-k8s-cni", awsnode) +
-byRegion("cni-metrics-helper", metricsHelper);
+byRegion("cni-metrics-helper", metricsHelper) +
+byRegion("v6pd-cni", v6pd);
 
 // Yaml-ified output values
 {

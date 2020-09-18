@@ -1,0 +1,260 @@
+---
+"apiVersion": "apps/v1"
+"kind": "DaemonSet"
+"metadata":
+  "labels":
+    "k8s-app": "aws-v6pd"
+  "name": "aws-node"
+  "namespace": "kube-system"
+"spec":
+  "selector":
+    "matchLabels":
+      "k8s-app": "aws-v6pd"
+  "template":
+    "metadata":
+      "labels":
+        "k8s-app": "aws-v6pd"
+    "spec":
+      "affinity":
+        "nodeAffinity":
+          "requiredDuringSchedulingIgnoredDuringExecution":
+            "nodeSelectorTerms":
+            - "matchExpressions":
+              - "key": "beta.kubernetes.io/os"
+                "operator": "In"
+                "values":
+                - "linux"
+              - "key": "beta.kubernetes.io/arch"
+                "operator": "In"
+                "values":
+                - "amd64"
+              - "key": "eks.amazonaws.com/compute-type"
+                "operator": "NotIn"
+                "values":
+                - "fargate"
+            - "matchExpressions":
+              - "key": "kubernetes.io/os"
+                "operator": "In"
+                "values":
+                - "linux"
+              - "key": "kubernetes.io/arch"
+                "operator": "In"
+                "values":
+                - "amd64"
+              - "key": "eks.amazonaws.com/compute-type"
+                "operator": "NotIn"
+                "values":
+                - "fargate"
+      "automountServiceAccountToken": false
+      "containers":
+      - "image": "602401143452.dkr.ecr.us-west-2.amazonaws.com/eks/pause-amd64:3.1"
+        "name": "pause"
+      "hostNetwork": true
+      "initContainers":
+      - "command":
+        - "/bin/sh"
+        - "-x"
+        - "-e"
+        - "-c"
+        - |
+          install -m755 host-local bandwidth portmap ptp egress-v4 /opt/cni/bin
+          ./json-tmpl --file=- -v=4 --logtostderr >/etc/cni/net.d/10-aws.conflist <<'EOF'
+          local metadata = std.native("metadata");
+          local primaryMac = metadata("mac");
+          
+          //local v6prefix = metadata("network/interfaces/macs/%s/ipv6-prefix" % primaryMac);
+          local v6prefix = importstr "/my-prefix";
+          
+          {
+            cniVersion: "0.3.1",
+            name: "aws-ipv6-pd",
+            plugins: [
+              {
+                type: "ptp",
+                mtu: 9001,
+                ipam: {
+                  type: "host-local",
+                  ranges: [[{
+                    subnet: v6prefix,
+                    //FIXME: rangeStart: .4, (defaults to .2)
+                    //rangeEnd: something big (defaults to .255)
+                  }]],
+                  routes: [{dst: "::/0"}],
+                  dataDir: "/run/cni/v6pd/ipam",
+                },
+              },
+              {
+                type: "egress-v4",
+                snatIP: metadata("local-ipv4"),
+                ipam: {
+                  type: "host-local",
+                  ranges: [[{
+                    subnet: "100.64.0.0/10",
+                  }]],
+                  routes: [{dst: "0.0.0.0/0"}],
+                  dataDir: "/run/cni/v6pd/egress-v4-ipam",
+                },
+              },
+              {
+                type: "portmap",
+                capabilities: {portMappings: true},
+              },
+              {
+                type: "bandwidth",
+                capabilities: {bandwidth: true},
+              },
+            ],
+          }
+          EOF
+        "image": "602401143452.dkr.ecr.us-west-2.amazonaws.com/amazon-v6pd-cni-init:latest"
+        "name": "conf"
+        "volumeMounts":
+        - "mountPath": "/opt/cni/bin"
+          "name": "cni-bin-dir"
+        - "mountPath": "/etc/cni/net.d"
+          "name": "cni-net-dir"
+        - "mountPath": "/my-prefix"
+          "name": "my-prefix"
+          "readOnly": true
+      "priorityClassName": "system-node-critical"
+      "terminationGracePeriodSeconds": 10
+      "volumes":
+      - "hostPath":
+          "path": "/opt/cni/bin"
+          "type": "DirectoryOrCreate"
+        "name": "cni-bin-dir"
+      - "hostPath":
+          "path": "/etc/cni/net.d"
+          "type": "DirectoryOrCreate"
+        "name": "cni-net-dir"
+      - "hostPath":
+          "path": "/run/fake-pd/my-prefix"
+          "type": "File"
+        "name": "my-prefix"
+  "updateStrategy":
+    "rollingUpdate":
+      "maxUnavailable": "10%"
+    "type": "RollingUpdate"
+---
+"apiVersion": "apps/v1"
+"kind": "DaemonSet"
+"metadata":
+  "labels":
+    "k8s-app": "fake-pd"
+  "name": "fake-pd"
+  "namespace": "kube-system"
+"spec":
+  "selector":
+    "matchLabels":
+      "k8s-app": "fake-pd"
+  "template":
+    "metadata":
+      "labels":
+        "k8s-app": "fake-pd"
+    "spec":
+      "containers":
+      - "command":
+        - "/bin/sh"
+        - "-x"
+        - "-e"
+        - "-c"
+        - |
+          metadata() {
+            curl -q http://169.254.169.254/2019-10-01/meta-data/$1
+          }
+          ip6cidr() {
+            # This is a randomly chosen ULA (/48), subnet 0 (/64), with embedded v4 address (/104).  Note bits 64-71 must be zero because RFC4291.
+            IFS=.; printf "fd47:6d80:fb79:0:%02x:%02x%02x:%02x00::/104" $1; IFS=
+          }
+          
+          install_packages iproute2
+          
+          while :; do
+            myip=$(metadata network/interfaces/macs/$(metadata mac)/ipv6s)
+            mypfx=$(ip6cidr $(metadata local-ipv4))
+            kubectl patch node $MYNODE -p "{\"metadata\":{\"annotations\":{\"eks.amazon.com/v6ip\":\"$myip\",\"eks.amazon.com/v6prefix\":\"$mypfx\"}}}"
+            echo -n $mypfx > /conf/my-prefix
+          
+            for node in $(kubectl get nodes -o name); do
+              pfx=$(kubectl get $node -o jsonpath="{.metadata.annotations['eks\.amazon\.com/v6prefix']}")
+              ip=$(kubectl get $node -o jsonpath="{.metadata.annotations['eks\.amazon\.com/v6ip']}")
+              if [ -z "$pfx" -o -z "$ip" ]; then
+                continue
+              fi
+              if [ $node = node/$MYNODE ]; then
+                ip route replace to $pfx dev eth0 expires 600
+              else
+                ip route replace to $pfx via $ip expires 600
+              fi
+            done
+          
+            sleep 300
+          done
+        "env":
+        - "name": "MYNODE"
+          "valueFrom":
+            "fieldRef":
+              "fieldPath": "spec.nodeName"
+        "image": "bitnami/kubectl:1.18.8"
+        "name": "pd"
+        "securityContext":
+          "capabilities":
+            "add":
+            - "NET_ADMIN"
+          "runAsUser": 0
+        "volumeMounts":
+        - "mountPath": "/conf"
+          "name": "confdir"
+          "readOnly": false
+      "hostNetwork": true
+      "priorityClassName": "system-node-critical"
+      "serviceAccountName": "fake-pd"
+      "terminationGracePeriodSeconds": 1
+      "tolerations":
+      - "effect": "NoSchedule"
+        "key": "node.kubernetes.io/not-ready"
+        "operator": "Exists"
+      "volumes":
+      - "hostPath":
+          "path": "/run/fake-pd"
+          "type": "DirectoryOrCreate"
+        "name": "confdir"
+  "updateStrategy":
+    "rollingUpdate":
+      "maxUnavailable": "10%"
+    "type": "RollingUpdate"
+---
+"apiVersion": "v1"
+"kind": "ServiceAccount"
+"metadata":
+  "name": "fake-pd"
+  "namespace": "kube-system"
+---
+"apiVersion": "rbac.authorization.k8s.io/v1"
+"kind": "ClusterRoleBinding"
+"metadata":
+  "name": "fake-pd"
+"roleRef":
+  "apiGroup": "rbac.authorization.k8s.io"
+  "kind": "ClusterRole"
+  "name": "fake-pd"
+"subjects":
+- "kind": "ServiceAccount"
+  "name": "fake-pd"
+  "namespace": "kube-system"
+---
+"apiVersion": "rbac.authorization.k8s.io/v1"
+"kind": "ClusterRole"
+"metadata":
+  "name": "fake-pd"
+"rules":
+- "apiGroups":
+  - ""
+  "resources":
+  - "nodes"
+  "verbs":
+  - "list"
+  - "get"
+  - "update"
+  - "patch"
+...

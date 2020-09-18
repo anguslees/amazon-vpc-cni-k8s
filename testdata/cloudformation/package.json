@@ -1,0 +1,24 @@
+{
+  "name": "v6pd-cluster",
+  "version": "1.0.0",
+  "description": "Integration test scenarios for amazon-vpc-cni-k8s",
+  "private": true,
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "cdk": "cdk"
+  },
+  "devDependencies": {
+    "@types/node": "^10.17.29",
+    "typescript": "^3.9.7"
+  },
+  "dependencies": {
+    "@aws-cdk/aws-ec2": "^1.61.1",
+    "@aws-cdk/aws-autoscaling": "^1.61.1",
+    "@aws-cdk/aws-iam": "^1.61.1",
+    "@aws-cdk/core": "^1.61.1",
+    "aws-cdk": "^1.61.1"
+  }
+}

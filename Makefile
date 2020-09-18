@@ -33,6 +33,10 @@ IMAGE_DIST = $(DESTDIR)/$(subst /,_,$(IMAGE_NAME)).tar.gz
 INIT_IMAGE = amazon/amazon-k8s-cni-init
 INIT_IMAGE_NAME = $(INIT_IMAGE)$(IMAGE_ARCH_SUFFIX):$(VERSION)
 INIT_IMAGE_DIST = $(DESTDIR)/$(subst /,_,$(INIT_IMAGE_NAME)).tar.gz
+# V6PD_INIT_IMAGE is the init container for AWS v6pd CNI.
+V6PD_INIT_IMAGE = amazon/amazon-v6pd-cni-init
+V6PD_INIT_IMAGE_NAME = $(V6PD_INIT_IMAGE)$(IMAGE_ARCH_SUFFIX):$(VERSION)
+V6PD_INIT_IMAGE_DIST = $(DESTDIR)/$(subst /,_,$(V6PD_INIT_IMAGE_NAME)).tar.gz
 # METRICS_IMAGE is the CNI metrics publisher sidecar container image.
 METRICS_IMAGE = amazon/cni-metrics-helper
 METRICS_IMAGE_NAME = $(METRICS_IMAGE)$(IMAGE_ARCH_SUFFIX):$(VERSION)
@@ -67,16 +71,21 @@ export CGO_ENABLED = 0
 export GO111MODULE = on
 export GOPROXY = direct
 
+# Tests in cmd/egress-v4 require NET_ADMIN/SYS_ADMIN.
+# 'unshare' provides this in a user namespace, otherwise 'sudo' will give "real" root.
+#ROOT_CMD = sudo
+ROOT_CMD = unshare -rm
+
 # LDFLAGS is the set of flags used when building golang executables.
 LDFLAGS = -X main.version=$(VERSION)
 # ALLPKGS is the set of packages provided in source.
 ALLPKGS = $(shell go list ./... | grep -v cmd/packet-verifier)
 # BINS is the set of built command executables.
-BINS = aws-k8s-agent aws-cni grpc-health-probe cni-metrics-helper
+BINS = aws-k8s-agent aws-cni grpc-health-probe cni-metrics-helper egress-v4 json-tmpl
 # Plugin binaries
-# Not copied: bridge dhcp firewall flannel host-device host-local ipvlan macvlan ptp sbr static tuning vlan
+# Not copied: bridge dhcp firewall flannel host-device ipvlan macvlan sbr static tuning vlan
 # For gnu tar, the full path in the tar file is required
-PLUGIN_BINS = ./loopback ./portmap ./bandwidth
+PLUGIN_BINS = ./loopback ./portmap ./bandwidth ./host-local ./ptp
 
 # DOCKER_ARGS is extra arguments passed during container image build.
 DOCKER_ARGS =
@@ -109,6 +118,8 @@ build-linux:
 	go build $(BUILD_FLAGS) -o aws-k8s-agent     ./cmd/aws-k8s-agent
 	go build $(BUILD_FLAGS) -o aws-cni           ./cmd/routed-eni-cni-plugin
 	go build $(BUILD_FLAGS) -o grpc-health-probe ./cmd/grpc-health-probe
+	go build $(BUILD_FLAGS) -o egress-v4 ./cmd/egress-v4
+	go build $(BUILD_FLAGS) -o json-tmpl ./cmd/json-tmpl
 
 # Build VPC CNI plugin & agent container image.
 docker:
@@ -125,6 +136,13 @@ docker-init:
 		.
 	@echo "Built Docker image \"$(INIT_IMAGE_NAME)\""
 
+docker-v6pdinit:
+	docker build $(DOCKER_BUILD_FLAGS) \
+		-f scripts/dockerfiles/Dockerfile.v6pdinit \
+		-t "$(V6PD_INIT_IMAGE_NAME)" \
+		.
+	@echo "Built Docker image \"$(V6PD_INIT_IMAGE_NAME)\""
+
 # Run the built CNI container image to use in functional testing
 docker-func-test: docker
 	docker run $(DOCKER_RUN_FLAGS) \
@@ -133,14 +151,14 @@ docker-func-test: docker
 # Run unit tests
 unit-test: export AWS_VPC_K8S_CNI_LOG_FILE=stdout
 unit-test:
-	go test -v -coverprofile=coverage.txt -covermode=atomic $(ALLPKGS)
+	$(ROOT_CMD) go test -v -coverprofile=coverage.txt -covermode=atomic $(ALLPKGS)
 
 # Run unit tests with race detection (can only be run natively)
 unit-test-race: export AWS_VPC_K8S_CNI_LOG_FILE=stdout
 unit-test-race: CGO_ENABLED=1
 unit-test-race: GOARCH=
 unit-test-race:
-	go test -v -cover -race -timeout 10s  ./cmd/...
+	$(ROOT_CMD) go test -v -cover -race -timeout 10s  ./cmd/...
 	go test -v -cover -race -timeout 150s ./pkg/awsutils/...
 	go test -v -cover -race -timeout 10s  ./pkg/k8sapi/...
 	go test -v -cover -race -timeout 10s  ./pkg/networkutils/...

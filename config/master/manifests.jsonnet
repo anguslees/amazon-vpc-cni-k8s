@@ -388,13 +388,17 @@ local v6pd = {
   daemonset: {
     kind: "DaemonSet",
     apiVersion: "apps/v1",
+    // NB: intentionally conflicts with awsnode.daemonset above.
+    // Can only have one installed, and this allows in-place switching.
+    // It doesn't have to be this way though, they could co-exist in
+    // the same cluster based on nodeSelectors, etc.
+    //local name = "aws-v6pd",
+    local name = "aws-node",
     metadata: {
-      // NB: intentionally conflicts with awsnode.daemonset above.
-      // Can only have one installed, and this allows in-place switching.
-      name: "aws-node",
+      name: name,
       namespace: "kube-system",
       labels: {
-        "k8s-app": "aws-v6pd",
+        "k8s-app": name,
       },
     },
     spec: {
@@ -409,7 +413,7 @@ local v6pd = {
       template: {
         metadata: {
           labels: {
-            "k8s-app": "aws-v6pd",
+            "k8s-app": name,
           },
         },
         spec: {
@@ -445,6 +449,9 @@ local v6pd = {
 
           hostNetwork: true,
           automountServiceAccountToken: false,
+          tolerations: [
+            {effect: "NoSchedule", operator: "Exists", key: "node.kubernetes.io/not-ready"},
+          ],
 
           volumes: [
             {
@@ -537,7 +544,7 @@ local v6pd = {
             pd: {
               // Poor-man's route broadcast (this is basically flannel host-gw)
               name: "pd",
-              image: "bitnami/kubectl:1.18.8",
+              image: "amazon/aws-cli:2.0.53",
               command: ["/bin/sh", "-x", "-e", "-c", self.shcmd],
               shcmd:: |||
                 metadata() {
@@ -548,36 +555,24 @@ local v6pd = {
                   IFS=.; printf "fd47:6d80:fb79:0:%02x:%02x%02x:%02x00::/104" $1; IFS=
                 }
 
-                install_packages iproute2
+                #myip=$(metadata network/interfaces/macs/$(metadata mac)/ipv6s)
+                mypfx=$(ip6cidr $(metadata local-ipv4))
+                ifid=$(metadata network/interfaces/macs/$(metadata mac)/interface-id)
+
+                echo -n $mypfx > /conf/my-prefix
+
+                aws ec2 modify-network-interface-attribute --no-source-dest-check --network-interface-id $ifid
+                for id in $ROUTE_TABLES; do
+                  aws ec2 create-route --route-table-id $id --destination-ipv6-cidr-block $mypfx --network-interface-id $ifid ||
+                  aws ec2 replace-route --route-table-id $id --destination-ipv6-cidr-block $mypfx --network-interface-id $ifid
+                done
 
                 while :; do
-                  myip=$(metadata network/interfaces/macs/$(metadata mac)/ipv6s)
-                  mypfx=$(ip6cidr $(metadata local-ipv4))
-                  kubectl patch node $MYNODE -p "{\"metadata\":{\"annotations\":{\"eks.amazon.com/v6ip\":\"$myip\",\"eks.amazon.com/v6prefix\":\"$mypfx\"}}}"
-                  echo -n $mypfx > /conf/my-prefix
-
-                  for node in $(kubectl get nodes -o name); do
-                    pfx=$(kubectl get $node -o jsonpath="{.metadata.annotations['eks\.amazon\.com/v6prefix']}")
-                    ip=$(kubectl get $node -o jsonpath="{.metadata.annotations['eks\.amazon\.com/v6ip']}")
-                    if [ -z "$pfx" -o -z "$ip" ]; then
-                      continue
-                    fi
-                    if [ $node = node/$MYNODE ]; then
-                      ip route replace to $pfx dev eth0 expires 600
-                    else
-                      ip route replace to $pfx via $ip expires 600
-                    fi
-                  done
-
-                  sleep 300
+                  sleep 86400
                 done
               |||,
               env_:: {
-                MYNODE: {
-                  valueFrom: {
-                    fieldRef: {fieldPath: "spec.nodeName"},
-                  },
-                },
+                ROUTE_TABLES: "@ROUTE_TABLES@",
               },
               env: [
                 {name: kv[0]} + if std.isObject(kv[1]) then kv[1] else {value: kv[1]}
@@ -605,6 +600,9 @@ local v6pd = {
     metadata: {
       name: "fake-pd",
       namespace: "kube-system",
+      annotations: {
+        "eks.amazon.com/role-arn": "@FAKEPD_ROLE@",
+      },
     },
   },
 

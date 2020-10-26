@@ -45,18 +45,22 @@ class EksVpcPrivateSubnetsStack extends cdk.Stack {
     }
 }
 
+export interface EksVpcPrivateSubnetsProps extends ec2.VpcProps {
+}
+
 export class EksVpcPrivateSubnets extends cdk.Construct {
     public readonly subnets: ec2.ISubnet[];
     public readonly securityGroup: ec2.SecurityGroup;
     public readonly vpc: ec2.Vpc;
 
-    constructor(scope: cdk.Construct, id: string) {
+    constructor(scope: cdk.Construct, id: string, props?: EksVpcPrivateSubnetsProps) {
         super(scope, id);
 
         const vpc6 = new Vpc6(this, 'VPC', {
             cidr: '192.168.0.0/16',
             enableDnsSupport: true,
             enableDnsHostnames: true,
+            ...props,
         });
         this.vpc = vpc6;
 
@@ -257,7 +261,7 @@ export class EksNodegroup extends cdk.Construct {
         const clusterCPSecurityGroup = props.clusterControlPlaneSecurityGroup;
         const clusterName = props.clusterName || this.node.uniqueId;
         const keyName = props.keyName;
-        const nodeAsgProps= props.nodeAutoScalingGroupProps || {maxSize: '3', minSize: '1'};
+        let nodeAsgProps= props.nodeAutoScalingGroupProps || {maxSize: '3', minSize: '1'};
         const nodeImage = props.nodeImage;
         const imdsV1Disabled = props.disableIMDSv1 ?? false;
         const instanceType = props.instanceType ?? new ec2.InstanceType('t3.medium');
@@ -295,7 +299,8 @@ export class EksNodegroup extends cdk.Construct {
         [ec2.Peer.anyIpv4(), ec2.Peer.anyIpv6()].forEach((l3) => {
             // Urgh, CDK errors out if we use Port.allTraffic() here
             // because of the allowAllOutbound=false wars, so we have
-            // to allow each of tcp/udp/icmp separately.
+            // to allow each of tcp/udp/icmp separately. Sorry about
+            // all the other protocols :(
             // https://github.com/aws/aws-cdk/pull/7827#discussion_r456199699
             [ec2.Port.allTcp(), ec2.Port.allUdp()].forEach((l4) => {
                 secGroup.connections.allowTo(l3, l4);
@@ -331,6 +336,45 @@ export class EksNodegroup extends cdk.Construct {
         instanceRole.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore'));
 
         userData.addCommands(`/etc/eks/bootstrap.sh ${clusterName} ${bootstrapArgs}`);
+
+        const usingFakePd = true;
+        if (usingFakePd) {
+            // ASG nor LaunchTemplates support the SourceDestCheck
+            // property (?!) so we have to do this the terrible way.
+            // Luckily this is only necessary for 'fake-pd', and all goes
+            // away when the real PD feature exists.
+            // TODO: Burn this and never look back.
+            let numInstances = nodeAsgProps.desiredCapacity ?? nodeAsgProps.maxSize;
+            if (cdk.Token.isUnresolved(numInstances)) {
+                cdk.Annotations.of(this).addWarning("Ignoring nodeAutoScalingGroupProps parameter and hard-coding numInstances=3");
+                numInstances = '3';
+            }
+            for (let i = 0; i < Number(numInstances); i++) {
+                new ec2.CfnInstance(this, `Instance${i}`, {
+                    blockDeviceMappings: [{
+                        deviceName: '/dev/xvda',
+                        ebs: {
+                            deleteOnTermination: true,
+                            volumeSize: nodeVolumeSize,
+                            volumeType: ec2.EbsDeviceVolumeType.GP2,
+                        },
+                    }],
+                    iamInstanceProfile: instanceProfile.ref,
+                    imageId: nodeImage.getImage(this).imageId,
+                    instanceType: instanceType.toString(),
+                    ipv6AddressCount: 1, // <- this!
+                    keyName: keyName,
+                    securityGroupIds: [secGroup].map(s => s.securityGroupId),
+                    sourceDestCheck: false, // <- and this!
+                    subnetId: subnetId,
+                    userData: cdk.Fn.base64(cdk.Lazy.stringValue({produce: () => userData.render()})),
+                })
+            }
+
+            // Make the "real" ASG useless:
+            nodeAsgProps = {maxSize: '0', minSize: '0', desiredCapacity: '0'};
+        }
+
 
         const launchTemplate = new ec2.CfnLaunchTemplate(this, 'NodeLaunchTemplate', {
             launchTemplateData: {
@@ -377,7 +421,7 @@ export class EksNodegroup extends cdk.Construct {
                 maxBatchSize: 1,
                 minInstancesInService: cdk.Token.asNumber(nodeAsgProps?.minSize),
                 pauseTime: cdk.Duration.minutes(5).toIsoString(),
-             },
+            },
         };
         addSignalOnExitCommand(userData, asg);
         this.node.defaultChild = asg;

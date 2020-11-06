@@ -88,6 +88,8 @@
           "requiredDuringSchedulingIgnoredDuringExecution":
             "nodeSelectorTerms":
             - "matchExpressions":
+              - "key": "cni"
+                "operator": "DoesNotExist"
               - "key": "beta.kubernetes.io/os"
                 "operator": "In"
                 "values":
@@ -102,6 +104,8 @@
                 "values":
                 - "fargate"
             - "matchExpressions":
+              - "key": "cni"
+                "operator": "DoesNotExist"
               - "key": "kubernetes.io/os"
                 "operator": "In"
                 "values":

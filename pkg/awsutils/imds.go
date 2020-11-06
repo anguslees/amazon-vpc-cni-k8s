@@ -200,6 +200,12 @@ func (imds TypedIMDS) GetSubnetIPv4CIDRBlock(ctx context.Context, mac string) (n
 	return imds.getCIDR(ctx, key)
 }
 
+// GetSubnetIPv6CIDRBlock returns the IPv6 CIDR block for the subnet in which the interface resides.
+func (imds TypedIMDS) GetSubnetIPv6CIDRBlock(ctx context.Context, mac string) (net.IPNet, error) {
+	key := fmt.Sprintf("network/interfaces/macs/%s/subnet-ipv6-cidr-block", mac)
+	return imds.getCIDR(ctx, key)
+}
+
 // GetVPCIPv4CIDRBlocks returns the IPv4 CIDR blocks for the VPC.
 func (imds TypedIMDS) GetVPCIPv4CIDRBlocks(ctx context.Context, mac string) ([]net.IPNet, error) {
 	key := fmt.Sprintf("network/interfaces/macs/%s/vpc-ipv4-cidr-blocks", mac)
@@ -226,6 +232,35 @@ func IsNotFound(err error) bool {
 		}
 	}
 	return false
+}
+
+// CachedIMDS is a wrapper around EC2MetadataIface that adds a naive cache.
+// There is no cache expiry, so don't use this for dynamic information.
+type CachedIMDS struct {
+	cache  map[string]string
+	client EC2MetadataIface
+}
+
+// NewCachedIMDS creates a new CachedIMDS.
+func NewCachedIMDS(imds EC2MetadataIface) CachedIMDS {
+	return CachedIMDS{
+		cache:  make(map[string]string),
+		client: imds,
+	}
+}
+
+// GetMetadataWithContext implements the EC2MetadataIface interface.
+func (c CachedIMDS) GetMetadataWithContext(ctx context.Context, p string) (string, error) {
+	result, ok := c.cache[p]
+	if !ok {
+		var err error
+		result, err = c.client.GetMetadataWithContext(ctx, p)
+		if err != nil {
+			return result, err
+		}
+		c.cache[p] = result
+	}
+	return result, nil
 }
 
 // FakeIMDS is a trivial implementation of EC2MetadataIface using an in-memory map - for testing.

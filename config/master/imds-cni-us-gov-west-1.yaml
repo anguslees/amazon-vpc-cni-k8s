@@ -1,0 +1,126 @@
+---
+"apiVersion": "apps/v1"
+"kind": "DaemonSet"
+"metadata":
+  "labels":
+    "k8s-app": "aws-imds-cni"
+  "name": "aws-imds-cni"
+  "namespace": "kube-system"
+"spec":
+  "selector":
+    "matchLabels":
+      "k8s-app": "aws-imds-cni"
+  "template":
+    "metadata":
+      "labels":
+        "k8s-app": "aws-imds-cni"
+    "spec":
+      "affinity":
+        "nodeAffinity":
+          "requiredDuringSchedulingIgnoredDuringExecution":
+            "nodeSelectorTerms":
+            - "matchExpressions":
+              - "key": "cni"
+                "operator": "In"
+                "values":
+                - "aws-imds-cni"
+              - "key": "beta.kubernetes.io/os"
+                "operator": "In"
+                "values":
+                - "linux"
+              - "key": "beta.kubernetes.io/arch"
+                "operator": "In"
+                "values":
+                - "amd64"
+              - "key": "eks.amazonaws.com/compute-type"
+                "operator": "NotIn"
+                "values":
+                - "fargate"
+            - "matchExpressions":
+              - "key": "cni"
+                "operator": "In"
+                "values":
+                - "aws-imds-cni"
+              - "key": "kubernetes.io/os"
+                "operator": "In"
+                "values":
+                - "linux"
+              - "key": "kubernetes.io/arch"
+                "operator": "In"
+                "values":
+                - "amd64"
+              - "key": "eks.amazonaws.com/compute-type"
+                "operator": "NotIn"
+                "values":
+                - "fargate"
+      "automountServiceAccountToken": false
+      "containers":
+      - "image": "013241004608.dkr.ecr.us-gov-west-1.amazonaws.com/eks/pause-amd64:3.1"
+        "name": "pause"
+      "hostNetwork": true
+      "initContainers":
+      - "command":
+        - "/bin/sh"
+        - "-x"
+        - "-e"
+        - "-c"
+        - |
+          ./attach-enis
+          install -m755 imds-ipam imds-ptp bandwidth portmap ptp /opt/cni/bin
+          ./json-tmpl --file=- -v=4 --logtostderr >/etc/cni/net.d/10-aws.conflist <<'EOF'
+          {
+            cniVersion: "0.3.1",
+            name: "aws-vpc",
+            plugins: [
+              {
+                type: "imds-ptp",
+                mtu: 9001,
+                ipam: {
+                  type: "imds-ipam",
+                  routes: [{dst: "0.0.0.0/0"}],
+                  dataDir: "/run/cni/ipam",
+                },
+              },
+              {
+                type: "portmap",
+                capabilities: {portMappings: true},
+              },
+              {
+                type: "bandwidth",
+                capabilities: {bandwidth: true},
+              },
+            ],
+          }
+          EOF
+        "env":
+        - "name": "AWS_VPC_K8S_CNI_LOGLEVEL"
+          "value": "Debug"
+        - "name": "AWS_VPC_K8S_CNI_LOG_FILE"
+          "value": "stdout"
+        "image": "013241004608.dkr.ecr.us-gov-west-1.amazonaws.com/amazon-v6pd-cni-init:latest"
+        "name": "conf"
+        "volumeMounts":
+        - "mountPath": "/opt/cni/bin"
+          "name": "cni-bin-dir"
+        - "mountPath": "/etc/cni/net.d"
+          "name": "cni-net-dir"
+      "priorityClassName": "system-node-critical"
+      "terminationGracePeriodSeconds": 10
+      "tolerations":
+      - "effect": "NoSchedule"
+        "key": "node.kubernetes.io/not-ready"
+        "operator": "Exists"
+      "volumes":
+      - "hostPath":
+          "path": "/opt/cni/bin"
+          "type": "DirectoryOrCreate"
+        "name": "cni-bin-dir"
+      - "hostPath":
+          "path": "/etc/cni/net.d"
+          "type": "DirectoryOrCreate"
+        "name": "cni-net-dir"
+  "updateStrategy":
+    "rollingUpdate":
+      "maxUnavailable": "10%"
+    "type": "RollingUpdate"
+...

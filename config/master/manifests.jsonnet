@@ -118,6 +118,10 @@ local awsnode = {
                   {
                     matchExpressions: [
                       {
+                        key: "cni",
+                        operator: "DoesNotExist",
+                      },
+                      {
                         key: prefix + "kubernetes.io/os",
                         operator: "In",
                         values: ["linux"],
@@ -376,6 +380,121 @@ local metricsHelper = {
                 for kv in objectItems(self.env_)
               ],
             },
+          },
+          containers: objectValues(self.containers_),
+        },
+      },
+    },
+  },
+};
+
+local imdsCni = {
+  daemonset: {
+    kind: "DaemonSet",
+    apiVersion: "apps/v1",
+    local name = "aws-imds-cni",
+    metadata: {
+      name: name,
+      namespace: "kube-system",
+      labels: {"k8s-app": name},
+    },
+    spec: {
+      local spec = self,
+      updateStrategy: {
+        type: "RollingUpdate",
+        rollingUpdate: {maxUnavailable: "10%"},
+      },
+      selector: {
+        matchLabels: spec.template.metadata.labels,
+      },
+      template: {
+        metadata: {
+          labels: {"k8s-app": name},
+        },
+        spec: {
+          priorityClassName: "system-node-critical",
+          terminationGracePeriodSeconds: 10,
+          affinity: {
+            nodeAffinity: {
+              requiredDuringSchedulingIgnoredDuringExecution: {
+                nodeSelectorTerms: [
+                  {
+                    matchExpressions: [
+                      {
+                        key: "cni",
+                        operator: "In",
+                        values: ["aws-imds-cni"],
+                      },
+                      {
+                        key: prefix + "kubernetes.io/os",
+                        operator: "In",
+                        values: ["linux"],
+                      },
+                      {
+                        key: prefix + "kubernetes.io/arch",
+                        operator: "In",
+                        values: ["amd64"],
+                      },
+                      {
+                        key: "eks.amazonaws.com/compute-type",
+                        operator: "NotIn",
+                        values: ["fargate"],
+                      },
+                    ],
+                  } for prefix in ["beta.", ""]
+                ],
+              },
+            },
+          },
+
+          hostNetwork: true,
+          automountServiceAccountToken: false,
+          tolerations: [
+            {effect: "NoSchedule", operator: "Exists", key: "node.kubernetes.io/not-ready"},
+          ],
+
+          volumes: [
+            {
+              name: "cni-bin-dir",
+              hostPath: {path: "/opt/cni/bin", type: "DirectoryOrCreate"},
+            },
+            {
+              name: "cni-net-dir",
+              hostPath: {path: "/etc/cni/net.d", type: "DirectoryOrCreate"},
+            },
+          ],
+          initContainers: [
+            {
+              name: "conf",
+              image: "%s/amazon-v6pd-cni-init:%s" % [$.ecrRepo, $.version],
+              local configTemplate = importstr "imds-cni.jsonnet",
+              command: ["/bin/sh", "-x", "-e", "-c", self.shcmd],
+              shcmd:: |||
+                ./attach-enis
+                install -m755 imds-ipam imds-ptp bandwidth portmap ptp /opt/cni/bin
+                ./json-tmpl --file=- -v=4 --logtostderr >/etc/cni/net.d/10-aws.conflist <<'EOF'
+                %sEOF
+              ||| % configTemplate,
+              env_:: {
+                AWS_VPC_K8S_CNI_LOGLEVEL: "Debug",
+                AWS_VPC_K8S_CNI_LOG_FILE: "stdout",
+              },
+              env: [
+                {name: kv[0]} + if std.isObject(kv[1]) then kv[1] else {value: kv[1]}
+                for kv in objectItems(self.env_)
+              ],
+              volumeMounts: [
+                {mountPath: "/opt/cni/bin", name: "cni-bin-dir"},
+                {mountPath: "/etc/cni/net.d", name: "cni-net-dir"},
+              ],
+            },
+          ],
+
+          containers_:: {
+            pause: {
+              name: "pause",
+              image: "%s/eks/pause-amd64:3.1" % $.ecrRepo,
+            }
           },
           containers: objectValues(self.containers_),
         },
@@ -649,6 +768,7 @@ local byRegion(basename, template) = {
 local output =
 byRegion("aws-k8s-cni", awsnode) +
 byRegion("cni-metrics-helper", metricsHelper) +
+byRegion("imds-cni", imdsCni) +
 byRegion("v6pd-cni", v6pd);
 
 // Yaml-ified output values

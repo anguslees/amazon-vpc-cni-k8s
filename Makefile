@@ -118,8 +118,11 @@ build-linux:
 	go build $(BUILD_FLAGS) -o aws-k8s-agent     ./cmd/aws-k8s-agent
 	go build $(BUILD_FLAGS) -o aws-cni           ./cmd/routed-eni-cni-plugin
 	go build $(BUILD_FLAGS) -o grpc-health-probe ./cmd/grpc-health-probe
-	go build $(BUILD_FLAGS) -o egress-v4 ./cmd/egress-v4
-	go build $(BUILD_FLAGS) -o json-tmpl ./cmd/json-tmpl
+	go build $(BUILD_FLAGS) -o egress-v4         ./cmd/egress-v4
+	go build $(BUILD_FLAGS) -o json-tmpl         ./cmd/json-tmpl
+	go build $(BUILD_FLAGS) -o attach-enis       ./cmd/attach-enis
+	go build $(BUILD_FLAGS) -o imds-ptp          ./cmd/imds-ptp
+	go build $(BUILD_FLAGS) -o imds-ipam         ./cmd/imds-ipam
 
 # Build VPC CNI plugin & agent container image.
 docker:

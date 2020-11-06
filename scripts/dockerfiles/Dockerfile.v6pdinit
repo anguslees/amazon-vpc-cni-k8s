@@ -29,6 +29,9 @@ WORKDIR /app
 COPY --from=builder \
         /go/src/github.com/aws/amazon-vpc-cni-k8s/egress-v4 \
         /go/src/github.com/aws/amazon-vpc-cni-k8s/json-tmpl \
+        /go/src/github.com/aws/amazon-vpc-cni-k8s/attach-enis \
+        /go/src/github.com/aws/amazon-vpc-cni-k8s/imds-ipam \
+        /go/src/github.com/aws/amazon-vpc-cni-k8s/imds-ptp \
         /go/src/github.com/aws/amazon-vpc-cni-k8s/loopback \
         /go/src/github.com/aws/amazon-vpc-cni-k8s/portmap \
         /go/src/github.com/aws/amazon-vpc-cni-k8s/bandwidth \

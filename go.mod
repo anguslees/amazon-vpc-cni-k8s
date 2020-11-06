@@ -3,6 +3,7 @@ module github.com/aws/amazon-vpc-cni-k8s
 go 1.14
 
 require (
+	github.com/alexflint/go-filemutex v0.0.0-20171022225611-72bdc8eae2ae
 	github.com/aws/aws-sdk-go v1.33.14
 	github.com/beorn7/perks v0.0.0-20180321164747-3a771d992973 // indirect
 	github.com/containernetworking/cni v0.8.0
@@ -21,6 +22,7 @@ require (
 	github.com/gregjones/httpcache v0.0.0-20190212212710-3befbb6ad0cc // indirect
 	github.com/hashicorp/golang-lru v0.5.1 // indirect
 	github.com/imdario/mergo v0.3.6 // indirect
+	github.com/j-keck/arping v0.0.0-20160618110441-2cf9dc699c56
 	github.com/json-iterator/go v1.1.5 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
 	github.com/modern-go/reflect2 v0.0.0-20180701023420-4b7aa43c6742 // indirect
